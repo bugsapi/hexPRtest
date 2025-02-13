@@ -1,0 +1,84 @@
+name: Simple Integration Test Workflow
+
+on:
+  pull_request_target:
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  test-metadata:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request_target' ||
+      github.event.pull_request.head.repo.full_name == github.repository ||
+      contains(github.event.pull_request.labels.*.name, 'ok to test')
+    
+    outputs:
+      matrix: ${{ steps.generate-matrix.outputs.result }}
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v2
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Generate test matrix
+        id: generate-matrix
+        uses: actions/github-script@v4
+        with:
+          script: |
+            const script = require('./.github/scripts/simple-test-matrix.js')
+            const matrix = script({ context })
+            console.log(matrix)
+            return matrix
+
+  run-tests:
+    needs: test-metadata
+    runs-on: ubuntu-latest
+    if: >-
+      needs.test-metadata.outputs.matrix &&
+      fromJSON(needs.test-metadata.outputs.matrix).include[0] &&
+      (
+        github.event_name != 'pull_request_target' ||
+        github.event.pull_request.head.repo.full_name == github.repository ||
+        contains(github.event.pull_request.labels.*.name, 'ok to test')
+      )
+    
+    strategy:
+      matrix: ${{ fromJSON(needs.test-metadata.outputs.matrix) }}
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v2
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Run test
+        run: echo "Running test for ${{ matrix.test-type }}"
+
+  add-comment:
+    needs: run-tests
+    runs-on: ubuntu-latest
+    if: >-
+      failure() &&
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    
+    permissions:
+      pull-requests: write
+
+    steps:
+      - name: Add comment
+        uses: actions/github-script@v4
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            github.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.name,
+              body: 'This PR requires the "ok to test" label to run integration tests.'
+            })
